@@ -1,4 +1,4 @@
-Cython
+# Cython
 numpy # ==1.23.0
 numba==0.56.4
 pandas
@@ -55,15 +55,15 @@ pypinyin==0.42.0
 webrtcvad
 torchshow
 
-# cal spk sim
-s3prl
-fire
+# # cal spk sim
+# s3prl
+# fire
 
-# cal LMD
-dlib
+# # cal LMD
+# dlib
 
-# debug
-ipykernel
+# # debug
+# ipykernel
 
 # lama
 hydra-core

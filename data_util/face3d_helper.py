@@ -168,6 +168,49 @@ class Face3DHelper(nn.Module):
             return lm2d.reshape([b,t,-1,2])
         return lm2d
     
+    def reconstruct_lm2d_c2w(self, id_coeff, exp_coeff, c2w, to_camera=True):
+        """
+        Generate 3D landmark with keypoint base!
+        id_coeff: Tensor[T, c=80]
+        exp_coeff: Tensor[T, c=64]
+        """
+        is_btc_flag = True if id_coeff.ndim == 3 else False
+        if is_btc_flag:
+            b,t,_ = id_coeff.shape
+            id_coeff = id_coeff.reshape([b*t,-1])
+            exp_coeff = exp_coeff.reshape([b*t,-1])
+            # euler = euler.reshape([b*t,-1])
+            # trans = trans.reshape([b*t,-1])
+        id_coeff = id_coeff.to(self.key_id_base.device)
+        exp_coeff = exp_coeff.to(self.key_id_base.device)
+        mean_face = self.key_mean_shape.squeeze().reshape([1, -1]) # [3*68, 1] ==> [1, 3*68]
+        id_base, exp_base = self.key_id_base, self.key_exp_base # [3*68, C]
+        identity_diff_face = torch.matmul(id_coeff, id_base.transpose(0,1)) # [t,c],[c,3*68] ==> [t,3*68]
+        expression_diff_face = torch.matmul(exp_coeff, exp_base.transpose(0,1)) # [t,c],[c,3*68] ==> [t,3*68]
+        
+        face = mean_face + identity_diff_face + expression_diff_face # [t,3N]
+        face = face.reshape([face.shape[0], -1, 3]) # [t,N,3]
+        # re-centering the face with mean_xyz, so the face will be in [-1, 1]
+        # rot = self.compute_rotation(euler)
+        # rot = c2w[:, :3, :3].transpose(1, 2)
+        # trans = -torch.bmm(rot, c2w[:, :3, [3]])[..., 0]
+        rot = c2w[:, :3, :3]
+        trans = -c2w[:, :3, 3]
+        # transform
+        lm3d = face @ rot + trans.unsqueeze(1) # [t, N, 3]
+        # to camera
+        if to_camera:
+            lm3d[...,-1] = 10 - lm3d[...,-1] 
+        # to image_plane
+        lm3d = lm3d @ self.persc_proj
+        lm2d = lm3d[..., :2] / lm3d[..., 2:]
+        # flip
+        lm2d[..., 1] = 224 - lm2d[..., 1]
+        lm2d /= 224
+        if is_btc_flag:
+            return lm2d.reshape([b,t,-1,2])
+        return lm2d
+    
     def compute_rotation(self, euler):
         """
         Return:

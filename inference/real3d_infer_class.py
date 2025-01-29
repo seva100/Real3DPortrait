@@ -36,6 +36,8 @@ from inference.infer_utils import mirror_index, load_img_to_512_hwc_array, load_
 from inference.infer_utils import smooth_camera_sequence, smooth_features_xd
 from inference.edit_secc import blink_eye_for_secc
 
+from dreifus.matrix import Pose, CameraCoordinateConvention, PoseType, Intrinsics
+
 # For debugging only:
 import lovely_tensors as lt
 lt.monkey_patch()
@@ -318,7 +320,7 @@ class GeneFace2Infer:
         c2w, intrinsics = camera_ret['c2w'], camera_ret['intrinsics']
 
         # -----
-        c2w_old = c2w
+        # c2w_old = c2w
         # # NOTE DEBUG hardcode camera!
         # c2w = np.array([[ 9.88826394e-01, -1.46583483e-01, -2.71223653e-02,
         #   1.28888577e-01],
@@ -406,7 +408,8 @@ class GeneFace2Infer:
             drv_motion_coeff_dict = self.drv_motion_coeff_dict
             batch['exp'] = torch.FloatTensor(drv_motion_coeff_dict['exp']).cuda()
 
-        batch = self.get_driving_motion(batch['id'], batch['exp'], batch['euler'], batch['trans'], batch, inp)
+        # batch = self.get_driving_motion(batch['id'], batch['exp'], batch['euler'], batch['trans'], batch, inp)
+        batch = self.get_driving_motion(batch['id'], batch['exp'], None, None, batch, inp)
         if self.use_icl_audio2motion:
             self.audio2secc_model.empty_context()
         return batch
@@ -450,7 +453,9 @@ class GeneFace2Infer:
                         batch['drv_secc'][j] = out_secc
 
         # get the drv_kp for torso model, using the transformed trajectory
-        drv_kp = self.face3d_helper.reconstruct_lm2d(id, exp, euler, trans) # [T, 68, 2]
+        # drv_kp = self.face3d_helper.reconstruct_lm2d(id, exp, euler, trans) # [T, 68, 2]
+        c2w = batch['camera'][:, :16].reshape([-1, 4, 4])
+        drv_kp = self.face3d_helper.reconstruct_lm2d_c2w(id, exp, c2w) # [T, 68, 2]
 
         drv_kp = (drv_kp-0.5) / 0.5 # rescale to -1~1
         batch['drv_kp'] = torch.clamp(drv_kp, -1, 1)
@@ -474,11 +479,6 @@ class GeneFace2Infer:
         # smooth torso drv_kp
         torso_smo_ksize = 7
         drv_kps = smooth_features_xd(drv_kps.reshape([-1, 68*2]), kernel_size=torso_smo_ksize).reshape([-1, 68, 2])
-
-        # ----
-        # NOTE DEBUG
-        np.save('forward_secc2video_camera.npy', camera.cpu().data.numpy())
-        # ----
 
         # forward renderer
         if inp['low_memory_usage']:
@@ -512,76 +512,66 @@ class GeneFace2Infer:
                             'ref_torso_img': ref_torso_img, 'bg_img': bg_img, 'segmap': segmap,
                             'kp_s': kp_src, 'kp_d': kp_drv}
                     if i == 0:
-                        #TODO visualize_points for nerf with highest accum opacity
                         gen_output = self.secc2video_model.forward(img=ref_img_head, camera=camera[i:i+1], cond=cond, ret={}, cache_backbone=True, use_cached_backbone=False)
                     else:
                         gen_output = self.secc2video_model.forward(img=ref_img_head, camera=camera[i:i+1], cond=cond, ret={}, cache_backbone=False, use_cached_backbone=True)
                     img = ((gen_output['image']+1)/2 * 255.).permute(0, 2, 3, 1)[0].int().cpu().numpy().astype(np.uint8)
                     
-                    # ---
-                    # NOTE DEBUG:
-                    imageio.imsave(f"sample_output_aux/rgb_{i}.png", img)
-                    np.save(f"sample_output_aux/depth_{i}.npy", gen_output['image_depth'].cpu().data.numpy())
-                    # ---
+                    # # ---
+                    # # NOTE DEBUG:
+                    # imageio.imsave(f"sample_output_aux/rgb_{i}.png", img)
+                    # np.save(f"sample_output_aux/depth_{i}.npy", gen_output['image_depth'].cpu().data.numpy())
+                    # # ---
 
-                    img_lst.append(gen_output['image'])
+                    # img_lst.append(gen_output['image'])
+                    img_lst.append((gen_output['image'] + 1) / 2.)
                     img_raw_lst.append(gen_output['image_raw'])
                     depth_img_lst.append(gen_output['image_depth'])
 
-            # save demo video
-            depth_imgs = torch.cat(depth_img_lst)
-            imgs = torch.cat(img_lst)
-            imgs_raw = torch.cat(img_raw_lst)
-            secc_img = torch.cat([torch.nn.functional.interpolate(drv_secc_colors[i:i+1], (512,512)) for i in range(num_frames)])
+            # # save demo video
+            # depth_imgs = torch.cat(depth_img_lst)
+            # imgs = torch.cat(img_lst)
+            # imgs_raw = torch.cat(img_raw_lst)
+            # secc_img = torch.cat([torch.nn.functional.interpolate(drv_secc_colors[i:i+1], (512,512)) for i in range(num_frames)])
             
-            if inp['out_mode'] == 'concat_debug':
-                secc_img = secc_img.cpu()
-                secc_img = ((secc_img + 1) * 127.5).permute(0, 2, 3, 1).int().numpy()
+            # if inp['out_mode'] == 'concat_debug':
+            #     secc_img = secc_img.cpu()
+            #     secc_img = ((secc_img + 1) * 127.5).permute(0, 2, 3, 1).int().numpy()
 
-                depth_img = F.interpolate(depth_imgs, (512,512)).cpu()
-                depth_img = depth_img.repeat([1,3,1,1])
-                depth_img = (depth_img - depth_img.min()) / (depth_img.max() - depth_img.min())
-                depth_img = depth_img * 2 - 1
-                depth_img = depth_img.clamp(-1,1)
+            #     depth_img = F.interpolate(depth_imgs, (512,512)).cpu()
+            #     depth_img = depth_img.repeat([1,3,1,1])
+            #     depth_img = (depth_img - depth_img.min()) / (depth_img.max() - depth_img.min())
+            #     depth_img = depth_img * 2 - 1
+            #     depth_img = depth_img.clamp(-1,1)
 
-                secc_img = secc_img / 127.5 - 1
-                secc_img = torch.from_numpy(secc_img).permute(0, 3, 1, 2)
-                imgs = torch.cat([ref_img_gt.repeat([imgs.shape[0],1,1,1]).cpu(), secc_img, F.interpolate(imgs_raw, (512,512)).cpu(), depth_img, imgs.cpu()], dim=-1)
-            elif inp['out_mode'] == 'final':
-                imgs = imgs.cpu()
-            elif inp['out_mode'] == 'debug':
-                raise NotImplementedError("to do: save separate videos")
-            imgs = imgs.clamp(-1,1)
+            #     secc_img = secc_img / 127.5 - 1
+            #     secc_img = torch.from_numpy(secc_img).permute(0, 3, 1, 2)
+            #     imgs = torch.cat([ref_img_gt.repeat([imgs.shape[0],1,1,1]).cpu(), secc_img, F.interpolate(imgs_raw, (512,512)).cpu(), depth_img, imgs.cpu()], dim=-1)
+            # elif inp['out_mode'] == 'final':
+            #     imgs = imgs.cpu()
+            # elif inp['out_mode'] == 'debug':
+            #     raise NotImplementedError("to do: save separate videos")
+            # imgs = imgs.clamp(-1,1)
 
-            debug_name = 'demo.mp4'
-            out_imgs = ((imgs.permute(0, 2, 3, 1) + 1)/2 * 255).int().cpu().numpy().astype(np.uint8)
-            writer = imageio.get_writer(debug_name, fps=25, format='FFMPEG', codec='h264')
+            # debug_name = 'demo.mp4'
+            # out_imgs = ((imgs.permute(0, 2, 3, 1) + 1)/2 * 255).int().cpu().numpy().astype(np.uint8)
+            # writer = imageio.get_writer(debug_name, fps=25, format='FFMPEG', codec='h264')
             
-            for i in tqdm.trange(len(out_imgs), desc="Imageio is saving video"):
-                writer.append_data(out_imgs[i])
-            writer.close()
-        
-        # add audio track
-        out_fname = 'infer_out/tmp/' + os.path.basename(inp['src_image_name'])[:-4] + '_' + os.path.basename(inp['drv_pose_name'])[:-4] + '.mp4' if inp['out_name'] == '' else inp['out_name']
-        try:
-            os.makedirs(os.path.dirname(out_fname), exist_ok=True)
-        except: pass
-        if inp['drv_audio_name'][-4:] in ['.wav', '.mp3']:
-            os.system(f"ffmpeg -i {debug_name} -i {self.wav16k_name} -y -v quiet -shortest {out_fname}")
-            os.system(f"rm {debug_name}")
-            os.system(f"rm {self.wav16k_name}")
-        else:
-            ret = os.system(f"ffmpeg -i {debug_name} -i {inp['drv_audio_name']} -map 0:v -map 1:a -y -v quiet -shortest {out_fname}")
-            if ret != 0: # 没有成功从drv_audio_name里面提取到音频, 则直接输出无音频轨道的纯视频
-                os.system(f"mv {debug_name} {out_fname}")
-        print(f"Saved at {out_fname}")
-        return out_fname
+            # for i in tqdm.trange(len(out_imgs), desc="Imageio is saving video"):
+            #     writer.append_data(out_imgs[i])
+            # writer.close()
+
+        # print(f"Saved at {out_fname}")
+        # return out_fname
+        return img_lst
         
     @torch.no_grad()
     def forward_system(self, batch, inp):
         self.forward_audio2secc(batch, inp)
-        out_fname = self.forward_secc2video(batch, inp)
-        return out_fname
+        # out_fname = self.forward_secc2video(batch, inp)
+        # return out_fname
+        img_lst = self.forward_secc2video(batch, inp)
+        return img_lst
 
     @classmethod
     def example_run(cls, inp=None):
@@ -595,6 +585,151 @@ class GeneFace2Infer:
 
         infer_instance = cls(inp['a2m_ckpt'], inp['head_ckpt'], inp['torso_ckpt'], inp=inp)
         infer_instance.infer_once(inp)
+    
+    def prepare_batch_from_custom_inp(self, inp, custom_pose, custom_intr=None, custom_driving_params=None):
+        """
+        :param inp: {...}
+        :param custom_pose: dreifus Pose
+        :param custom_intr: numpy array 3x3 -- optional
+        :return: a dict that contains the condition feature of NeRF
+        """
+        tmp_img_name = 'infer_out/tmp/cropped_src_img.png'
+        crop_img_on_face_area_percent(inp['src_image_name'], tmp_img_name, min_face_area_percent=inp['min_face_area_percent'])
+        inp['src_image_name'] = tmp_img_name
+
+        sample = {}
+        # Process Driving Motion
+        
+        # drv_audio_name <-- drv_pose_name
+
+        # drv_motion_coeff_dict = fit_3dmm_for_a_video(inp['drv_audio_name'], save=False)
+        if custom_driving_params is not None:
+            drv_motion_coeff_dict = custom_driving_params
+        else:
+            drv_motion_coeff_dict = fit_3dmm_for_a_video(inp['drv_pose_name'], save=False)
+        drv_motion_coeff_dict = convert_to_tensor(drv_motion_coeff_dict)
+        t_x = drv_motion_coeff_dict['exp'].shape[0] * 2
+        self.drv_motion_coeff_dict = drv_motion_coeff_dict
+
+        # Face Parsing
+        image_name = inp['src_image_name']
+        if image_name.endswith(".mp4"):
+            img = read_first_frame_from_a_video(image_name)
+            image_name = inp['src_image_name'] = image_name[:-4] + '.png'
+            cv2.imwrite(image_name, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        sample['ref_gt_img'] = load_img_to_normalized_512_bchw_tensor(image_name).cuda()
+        img = load_img_to_512_hwc_array(image_name)
+        segmap = self.seg_model._cal_seg_map(img)
+        sample['segmap'] = torch.tensor(segmap).float().unsqueeze(0).cuda()
+        head_img = self.seg_model._seg_out_img_with_segmap(img, segmap, mode='head')[0]
+        sample['ref_head_img'] = ((torch.tensor(head_img) - 127.5)/127.5).float().unsqueeze(0).permute(0, 3, 1,2).cuda() # [b,c,h,w]
+        ts.save(sample['ref_head_img'])
+        inpaint_torso_img, _, _, _ = inpaint_torso_job(img, segmap)
+        sample['ref_torso_img'] = ((torch.tensor(inpaint_torso_img) - 127.5)/127.5).float().unsqueeze(0).permute(0, 3, 1,2).cuda() # [b,c,h,w]
+        
+        if inp['bg_image_name'] == '':
+            bg_img = extract_background([img], [segmap], 'knn')
+        else:
+            bg_img = cv2.imread(inp['bg_image_name'])
+            bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
+            bg_img = cv2.resize(bg_img, (512,512))
+        sample['bg_img'] = ((torch.tensor(bg_img) - 127.5)/127.5).float().unsqueeze(0).permute(0, 3, 1,2).cuda() # [b,c,h,w]
+
+        # 3DMM, get identity code and camera pose
+        coeff_dict = fit_3dmm_for_a_image(image_name, save=False)
+        assert coeff_dict is not None
+        src_id = torch.tensor(coeff_dict['id']).reshape([1,80]).cuda()
+        src_exp = torch.tensor(coeff_dict['exp']).reshape([1,64]).cuda()
+        src_euler = torch.tensor(coeff_dict['euler']).reshape([1,3]).cuda()
+        src_trans = torch.tensor(coeff_dict['trans']).reshape([1,3]).cuda()
+        sample['id'] = src_id.repeat([t_x//2,1])
+
+        # get the src_kp for torso model
+        src_kp = self.face3d_helper.reconstruct_lm2d(src_id, src_exp, src_euler, src_trans) # [1, 68, 2]
+        src_kp = (src_kp-0.5) / 0.5 # rescale to -1~1
+        sample['src_kp'] = torch.clamp(src_kp, -1, 1).repeat([t_x//2,1,1])
+
+        # get camera pose file
+        # random.seed(time.time())
+        # inp['drv_pose_name'] = inp['drv_pose_name']
+        # print(f"| To extract pose from {inp['drv_pose_name']}")
+
+        # extract camera pose 
+        # if inp['drv_pose_name'] == 'static':
+        #     sample['euler'] = torch.tensor(coeff_dict['euler']).reshape([1,3]).cuda().repeat([t_x//2,1]) # default static pose
+        #     sample['trans'] = torch.tensor(coeff_dict['trans']).reshape([1,3]).cuda().repeat([t_x//2,1])
+        # else: # from file
+        #     if inp['drv_pose_name'].endswith('.mp4'):
+        #         # extract coeff from video
+        #         drv_pose_coeff_dict = fit_3dmm_for_a_video(inp['drv_pose_name'], save=False)
+        #     else:
+        #         # load from npy
+        #         drv_pose_coeff_dict = np.load(inp['drv_pose_name'], allow_pickle=True).tolist()
+        #     print(f"| Extracted pose from {inp['drv_pose_name']}")
+        #     eulers = convert_to_tensor(drv_pose_coeff_dict['euler']).reshape([-1,3]).cuda()
+        #     trans = convert_to_tensor(drv_pose_coeff_dict['trans']).reshape([-1,3]).cuda()
+        #     len_pose = len(eulers)
+        #     index_lst = [mirror_index(i, len_pose) for i in range(t_x//2)]
+        #     sample['euler'] = eulers[index_lst]
+        #     sample['trans'] = trans[index_lst]
+
+        # # fix the z axis
+        # sample['trans'][:, -1] = sample['trans'][0:1, -1].repeat([sample['trans'].shape[0]])
+
+        # # mapping to the init pose
+        # print(inp)
+        # if inp.get("map_to_init_pose", 'True') in ['True', True]:
+        #     diff_euler = torch.tensor(coeff_dict['euler']).reshape([1,3]).cuda() - sample['euler'][0:1]
+        #     sample['euler'] = sample['euler'] + diff_euler
+        #     diff_trans = torch.tensor(coeff_dict['trans']).reshape([1,3]).cuda() - sample['trans'][0:1]
+        #     sample['trans'] = sample['trans'] + diff_trans
+
+        # # prepare camera
+        # camera_ret = get_eg3d_convention_camera_pose_intrinsic({'euler':sample['euler'].cpu(), 'trans':sample['trans'].cpu()})
+        # c2w, intrinsics = camera_ret['c2w'], camera_ret['intrinsics']
+
+        if custom_intr is not None:
+            intrinsics = custom_intr
+        else:
+            intrinsics = np.array(
+                [[4.2647, 0.    , 0.5   ],
+                 [0.    , 4.2647, 0.5   ],
+                 [0.    , 0.    , 1.    ]]
+            )    # they use the format of intrinsics when it's before multiplying by resolution
+        intrinsics = np.repeat(intrinsics[None], t_x // 2, axis=0)
+
+        c2w = custom_pose.copy()
+        c2w.change_pose_type(PoseType.CAM_2_WORLD)
+        c2w.change_camera_coordinate_convention(CameraCoordinateConvention.OPEN_CV)
+        c2w = np.asarray(c2w)
+        c2w = np.repeat(c2w[None], t_x // 2, axis=0)
+        
+        # smooth camera
+        camera_smo_ksize = 7
+        camera = np.concatenate([c2w.reshape([-1,16]), intrinsics.reshape([-1,9])], axis=-1)
+        # camera = smooth_camera_sequence(camera, kernel_size=camera_smo_ksize) # [T, 25]    # irrelevant when only 1 timestep is used --> commenting
+        camera = torch.tensor(camera).cuda().float()
+        sample['camera'] = camera
+
+        return sample
+
+    
+    def forward(self, inp, src_img_path, driving_params, pose):
+        # src_img_path: str (path to source image)
+        # driving_params: dict {...} -- output of fit_3dmm_for_a_video
+        # pose: dreifus Pose
+
+        # prepare batch
+        inp['src_img_name'] = src_img_path
+        sample = self.prepare_batch_from_custom_inp(inp, custom_pose=pose, custom_driving_params=driving_params)
+
+        # forward
+        render_img_list = self.forward_system(sample, inp)
+
+        # render_img = render_img_list[0]
+
+        # return render_img
+        return render_img_list
 
     ##############
     # IO-related
@@ -644,7 +779,8 @@ if __name__ == '__main__':
             'torso_ckpt': args.torso_ckpt,
             'src_image_name': args.src_img,
             'bg_image_name': args.bg_img,
-            'drv_audio_name': args.drv_aud,
+            # 'drv_audio_name': args.drv_aud,
+            'drv_audio_name': args.drv_pose,
             'drv_pose_name': args.drv_pose,
             'blink_mode': args.blink_mode,
             'temperature': args.temperature,
@@ -658,4 +794,25 @@ if __name__ == '__main__':
             'low_memory_usage': args.low_memory_usage,
             }
 
-    GeneFace2Infer.example_run(inp)
+    # GeneFace2Infer.example_run(inp)
+    model = GeneFace2Infer(inp['a2m_ckpt'], inp['head_ckpt'], inp['torso_ckpt'], inp=inp)
+
+    pose = np.load('temp_c2w_init.npy')[0]
+    pose = Pose(pose, pose_type=PoseType.CAM_2_WORLD, camera_coordinate_convention=CameraCoordinateConvention.OPEN_CV)
+
+    src_img = inp['src_image_name']
+    inp['drv_audio_name'] = inp['drv_pose_name']
+    driving_params = fit_3dmm_for_a_video(inp['drv_pose_name'], save=False)   # driving_params['exp'] will be BFM expr params
+    # img = model.forward(inp, src_img, driving_params, pose)
+    img_list = model.forward(inp, src_img, driving_params, pose)
+    # img_np = img[0].permute(1, 2, 0).cpu().numpy()
+
+    for i, img in enumerate(img_list):
+        img_np = img[0].permute(1, 2, 0).cpu().numpy()
+        img_np = (np.clip(img_np, 0, 1) * 255).astype(np.uint8)
+        imageio.imsave(f'sample_output/rgb_{i}.png', img_np)
+
+    # img_np = (np.clip(img_np, 0, 1) * 255).astype(np.uint8)
+
+    # imageio.imsave('output.png', img_np)
+    # img_np
